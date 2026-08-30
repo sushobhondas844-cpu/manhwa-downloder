@@ -1,5 +1,5 @@
 # Module 1: Event Triggers
-# Function: Defines the schedule and manual dispatch events for the workflow.
+# Description: Defines the schedule and manual dispatch events for the workflow.
 name: Automated Manhwa Chapter Ingestion
 
 on:
@@ -12,12 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 # Module 2: Code Retrieval
-# Function: Checks out the repository files into the runner environment.
+# Description: Checks out the repository files into the runner environment.
       - name: Checkout Code Repository
         uses: actions/checkout@v4
 
 # Module 3: Environment Setup
-# Function: Installs the designated Python version and required libraries.
+# Description: Installs Python and the required pip packages.
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -27,8 +27,14 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-# Module 4: Pipeline Execution
-# Function: Injects the dual authentication secrets and executes the main process.
+# Module 4: Headless Browser Provisioning
+# Description: Downloads the core Chromium browser system required by Playwright to render JavaScript pages.
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium
+
+# Module 5: Pipeline Execution
+# Description: Injects the dual authentication secrets and executes the main process.
       - name: Execute Downloader Pipeline
         env:
           NEXUS_DRIVE_CREDS: ${{ secrets.NEXUS_DRIVE_CREDS }}
