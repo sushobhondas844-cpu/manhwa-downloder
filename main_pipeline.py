@@ -105,15 +105,39 @@ def extract_panels_with_playwright(chapter_url):
     return captured_urls
 
 # Module 4: Sequence Extraction Engine
-# Description: Parses trailing numbers from filenames for sorting.
+# Description: Parses the digits located exactly before the file extension.
 def get_sequential_number(url):
     parsed = urlparse(url)
     filename = os.path.basename(parsed.path)
-    numbers = re.findall(r'\d+', filename)
-    seq = int(numbers[-1]) if numbers else -1
-    return seq, filename
+    match = re.search(r'(\d+)\.(?:jpg|jpeg|png|webp)$', filename, re.IGNORECASE)
+    if match:
+        seq = int(match.group(1))
+        return seq, filename
+    return -1, filename
 
-# Module 5: Verification Engine
+# Module 5: Continuity Filter Engine
+# Description: Builds an unbroken numerical chain and completely blocks massive erratic jumps.
+def filter_chronological_chain(sequenced_panels, max_gap=2):
+    if not sequenced_panels:
+        return []
+    
+    sequenced_panels.sort(key=lambda x: x[0])
+    valid_chain = [sequenced_panels[0]]
+    current_seq = sequenced_panels[0][0]
+    
+    for panel in sequenced_panels[1:]:
+        seq_num = panel[0]
+        jump = seq_num - current_seq
+        
+        if 0 <= jump <= max_gap:
+            valid_chain.append(panel)
+            current_seq = seq_num
+        elif jump > max_gap:
+            break
+            
+    return valid_chain
+
+# Module 6: Verification Engine
 # Description: Validates bytes to discard corrupted files.
 def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
     if len(image_bytes) < min_size_kb * 1024:
@@ -129,7 +153,7 @@ def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
             os.remove(target_path)
         return False
 
-# Module 6: Drive Ingestion Engine
+# Module 7: Drive Ingestion Engine
 # Description: Uploads chronologically verified files to Drive.
 def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     file_metadata = {
@@ -148,7 +172,7 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
             drive_service.files().create(body=f_metadata, media_body=media, fields='id').execute()
     return created_id
 
-# Module 7: Main Workflow Engine
+# Module 8: Main Workflow Engine
 # Description: Coordinates extraction queue and sequential downloads.
 def process_queue():
     gc, drive_service = get_google_services()
@@ -181,16 +205,16 @@ def process_queue():
             queue_ws.update_cell(idx, 4, error_msg)
             continue
         
-        sequenced_panels = []
+        raw_sequences = []
         for url in panel_urls:
             seq, fname = get_sequential_number(url)
             if seq >= 0:
-                sequenced_panels.append((seq, fname, url))
+                raw_sequences.append((seq, fname, url))
                 
-        sequenced_panels.sort(key=lambda x: x[0])
+        valid_panels = filter_chronological_chain(raw_sequences)
         
         success_count = 0
-        for seq, original_fname, p_url in sequenced_panels:
+        for seq, original_fname, p_url in valid_panels:
             target_path = os.path.join(local_dir, original_fname)
             try:
                 session.headers["Referer"] = chapter_url
