@@ -69,27 +69,28 @@ def extract_panels_with_playwright(chapter_url):
         )
         page = context.new_page()
 
-        # Intercept and log chapter image requests directly from network
+        # Intercept CDN responses directly
         def handle_response(response):
             url = response.url
-            if response.status == 200 and ("image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])):
-                # Filter out UI icons, logos, tracking pixels, and avatars
-                if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads', 'facebook', 'twitter', 'discord']):
-                    if "asura-images/chapters" in url or "chapter" in url or "comics" in url:
+            if response.status == 200:
+                is_image = "image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
+                if is_image and ("asura-images/chapters" in url or "chapter" in url or "comics" in url):
+                    # Filter UI icons, avatars, and ads
+                    if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads', 'discord']):
                         if url not in seen:
                             seen.add(url)
                             captured_urls.append(url)
 
         page.on("response", handle_response)
         
-        print(f"Loading page: {chapter_url}")
+        print(f"Loading page in headless browser: {chapter_url}")
         page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
 
-        # Dynamic scroll loop to trigger all lazy-loaded elements
+        # Dynamic scroll loop until the bottom of the page is reached
         last_height = page.evaluate("() => document.body.scrollHeight")
         no_change_count = 0
 
-        while no_change_count < 4:
+        while no_change_count < 5:
             page.evaluate("() => window.scrollBy(0, 1500)")
             time.sleep(0.4)
             new_height = page.evaluate("() => document.body.scrollHeight")
@@ -100,8 +101,7 @@ def extract_panels_with_playwright(chapter_url):
                 no_change_count = 0
                 last_height = new_height
 
-        # Final short wait to ensure trailing requests finish
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
         browser.close()
 
     return captured_urls
@@ -161,12 +161,12 @@ def process_queue():
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
         os.makedirs(local_dir, exist_ok=True)
         
-        print(f"==================================================")
+        print("==================================================")
         print(f"Processing Task (Row {idx}): {series_name} - Chapter {chapter_num}")
-        print(f"==================================================")
+        print("==================================================")
 
         panel_urls = extract_panels_with_playwright(chapter_url)
-        print(f"Extracted {len(panel_urls)} panels.")
+        print(f"Captured {len(panel_urls)} panels via network interception.")
         
         success_count = 0
         for p_idx, p_url in enumerate(panel_urls, start=1):
@@ -188,7 +188,7 @@ def process_queue():
             uploaded_id = upload_folder_to_drive(drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID)
             queue_ws.update_cell(idx, 4, "Downloaded")
             queue_ws.update_cell(idx, 5, f"Drive Folder ID: {uploaded_id}")
-            print(f"Row {idx} updated to 'Downloaded' in Google Sheets.")
+            print(f"Drive upload complete. Row {idx} updated to 'Downloaded' in Google Sheets.")
 
 if __name__ == "__main__":
     process_queue()
