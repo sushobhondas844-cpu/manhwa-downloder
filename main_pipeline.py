@@ -19,6 +19,7 @@ RAW_STAGING_FOLDER_ID = "1EGeKmI9y_7iV3Wu9LuTEJLk_5vTgZXpk"
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Module 1: Authentication Engine
+# Description: Authenticates Google Drive and Sheets using dual credentials to bypass storage limits.
 def get_google_services():
     sa_json_str = os.environ.get("NEXUS_DRIVE_CREDS")
     sa_info = json.loads(sa_json_str)
@@ -38,6 +39,7 @@ def get_google_services():
     return gc, drive_service
 
 # Module 2: Network Session Engine
+# Description: Creates a requests session with automatic retries and browser headers for downloading images.
 def create_resilient_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -50,51 +52,44 @@ def create_resilient_session():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     })
     return session
 
-# Module 3: Network Interception & Full-Scroll Playwright Engine
+# Module 3: Network Interception Engine
+# Description: Scrolls through the page dynamically to trigger and capture all lazy loaded image URLs.
 def extract_panels_with_playwright(chapter_url):
     captured_urls = []
     seen = set()
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             viewport={"width": 1280, "height": 1080}
         )
         page = context.new_page()
 
-        # Intercept CDN responses directly
         def handle_response(response):
             url = response.url
             if response.status == 200:
                 is_image = "image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
                 if is_image and ("asura-images/chapters" in url or "chapter" in url or "comics" in url):
-                    # Filter UI icons, avatars, and ads
                     if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads', 'discord']):
                         if url not in seen:
                             seen.add(url)
                             captured_urls.append(url)
 
         page.on("response", handle_response)
-        
-        print(f"Loading page in headless browser: {chapter_url}")
         page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
 
-        # Dynamic scroll loop until the bottom of the page is reached
         last_height = page.evaluate("() => document.body.scrollHeight")
         no_change_count = 0
-
         while no_change_count < 5:
             page.evaluate("() => window.scrollBy(0, 1500)")
             time.sleep(0.4)
             new_height = page.evaluate("() => document.body.scrollHeight")
-            
             if new_height == last_height:
                 no_change_count += 1
             else:
@@ -103,10 +98,19 @@ def extract_panels_with_playwright(chapter_url):
 
         page.wait_for_timeout(2500)
         browser.close()
-
     return captured_urls
 
-# Module 4: Verification Engine
+# Module 4: Sequence Extraction Engine
+# Description: Parses the trailing numbers from the raw website filename to ensure exact chronological sorting.
+def get_sequential_number(url):
+    parsed = urlparse(url)
+    filename = os.path.basename(parsed.path)
+    numbers = re.findall(r'\d+', filename)
+    seq = int(numbers[-1]) if numbers else -1
+    return seq, filename
+
+# Module 5: Verification Engine
+# Description: Validates downloaded bytes to discard corrupted files or empty placeholders.
 def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
     if len(image_bytes) < min_size_kb * 1024:
         return False
@@ -121,7 +125,8 @@ def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
             os.remove(target_path)
         return False
 
-# Module 5: Drive Ingestion Engine
+# Module 6: Drive Ingestion Engine
+# Description: Uploads the chronologically verified local files into Google Drive.
 def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     file_metadata = {
         'name': folder_name,
@@ -139,7 +144,8 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
             drive_service.files().create(body=f_metadata, media_body=media, fields='id').execute()
     return created_id
 
-# Module 6: Main Workflow Engine
+# Module 7: Main Workflow Engine
+# Description: Coordinates the extraction queue and executes the sequential downloading logic.
 def process_queue():
     gc, drive_service = get_google_services()
     sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -161,16 +167,19 @@ def process_queue():
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
         os.makedirs(local_dir, exist_ok=True)
         
-        print("==================================================")
-        print(f"Processing Task (Row {idx}): {series_name} - Chapter {chapter_num}")
-        print("==================================================")
-
         panel_urls = extract_panels_with_playwright(chapter_url)
-        print(f"Captured {len(panel_urls)} panels via network interception.")
+        
+        sequenced_panels = []
+        for url in panel_urls:
+            seq, fname = get_sequential_number(url)
+            if seq >= 0:
+                sequenced_panels.append((seq, fname, url))
+                
+        sequenced_panels.sort(key=lambda x: x[0])
         
         success_count = 0
-        for p_idx, p_url in enumerate(panel_urls, start=1):
-            target_path = os.path.join(local_dir, f"panel_{p_idx:03d}.jpg")
+        for seq, original_fname, p_url in sequenced_panels:
+            target_path = os.path.join(local_dir, original_fname)
             try:
                 session.headers["Referer"] = chapter_url
                 p_resp = session.get(p_url, timeout=25)
@@ -181,14 +190,11 @@ def process_queue():
                 pass
             time.sleep(0.05)
 
-        print(f"Successfully verified {success_count}/{len(panel_urls)} panels locally.")
-
         if success_count > 0:
             gdrive_name = f"{series_name}_Chapter_{chapter_num}"
             uploaded_id = upload_folder_to_drive(drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID)
             queue_ws.update_cell(idx, 4, "Downloaded")
             queue_ws.update_cell(idx, 5, f"Drive Folder ID: {uploaded_id}")
-            print(f"Drive upload complete. Row {idx} updated to 'Downloaded' in Google Sheets.")
 
 if __name__ == "__main__":
     process_queue()
