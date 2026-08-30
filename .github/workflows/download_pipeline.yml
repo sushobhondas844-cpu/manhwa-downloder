@@ -1,18 +1,23 @@
+# Module 1: Event Triggers
+# Function: Defines the schedule and manual dispatch events for the workflow.
 name: Automated Manhwa Chapter Ingestion
 
 on:
   schedule:
-    # Runs automatically every 12 hours
     - cron: '0 */12 * * *'
-  workflow_dispatch: # Allows clicking 'Run workflow' manually anytime
+  workflow_dispatch: 
 
 jobs:
-  download-and-upload:
+  download_and_upload:
     runs-on: ubuntu-latest
     steps:
+# Module 2: Code Retrieval
+# Function: Checks out the repository files into the runner environment.
       - name: Checkout Code Repository
         uses: actions/checkout@v4
 
+# Module 3: Environment Setup
+# Function: Installs the designated Python version and required libraries.
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -22,8 +27,11 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+# Module 4: Pipeline Execution
+# Function: Injects the dual authentication secrets and executes the main process.
       - name: Execute Downloader Pipeline
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          NEXUS_DRIVE_CREDS: ${{ secrets.NEXUS_DRIVE_CREDS }}
+          DRIVE_OAUTH_TOKEN: ${{ secrets.DRIVE_OAUTH_TOKEN }}
         run: |
           python main_pipeline.py
