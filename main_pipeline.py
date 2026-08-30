@@ -19,7 +19,7 @@ RAW_STAGING_FOLDER_ID = "1EGeKmI9y_7iV3Wu9LuTEJLk_5vTgZXpk"
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Module 1: Authentication Engine
-# Description: Authenticates Google Drive and Sheets using dual credentials to bypass storage limits.
+# Description: Authenticates Google Drive and Sheets using dual credentials.
 def get_google_services():
     sa_json_str = os.environ.get("NEXUS_DRIVE_CREDS")
     sa_info = json.loads(sa_json_str)
@@ -39,7 +39,7 @@ def get_google_services():
     return gc, drive_service
 
 # Module 2: Network Session Engine
-# Description: Creates a requests session with automatic retries and browser headers for downloading images.
+# Description: Creates a HTTP session with automatic retries.
 def create_resilient_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -52,14 +52,14 @@ def create_resilient_session():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User\x2dAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept\x2dLanguage": "en\x2dUS,en;q=0.9",
     })
     return session
 
 # Module 3: Network Interception Engine
-# Description: Scrolls through the page dynamically to trigger and capture all lazy loaded image URLs.
+# Description: Captures image URLs via browser rendering.
 def extract_panels_with_playwright(chapter_url):
     captured_urls = []
     seen = set()
@@ -74,15 +74,19 @@ def extract_panels_with_playwright(chapter_url):
         def handle_response(response):
             url = response.url
             if response.status == 200:
-                is_image = "image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
-                if is_image and ("asura-images/chapters" in url or "chapter" in url or "comics" in url):
-                    if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads', 'discord']):
+                is_image = "image" in response.headers.get("content\x2dtype", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
+                if is_image and ("asura" in url or "chapter" in url or "comics" in url):
+                    if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads']):
                         if url not in seen:
                             seen.add(url)
                             captured_urls.append(url)
 
         page.on("response", handle_response)
-        page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            browser.close()
+            return []
 
         last_height = page.evaluate("() => document.body.scrollHeight")
         no_change_count = 0
@@ -101,7 +105,7 @@ def extract_panels_with_playwright(chapter_url):
     return captured_urls
 
 # Module 4: Sequence Extraction Engine
-# Description: Parses the trailing numbers from the raw website filename to ensure exact chronological sorting.
+# Description: Parses trailing numbers from filenames for sorting.
 def get_sequential_number(url):
     parsed = urlparse(url)
     filename = os.path.basename(parsed.path)
@@ -110,7 +114,7 @@ def get_sequential_number(url):
     return seq, filename
 
 # Module 5: Verification Engine
-# Description: Validates downloaded bytes to discard corrupted files or empty placeholders.
+# Description: Validates bytes to discard corrupted files.
 def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
     if len(image_bytes) < min_size_kb * 1024:
         return False
@@ -126,11 +130,11 @@ def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
         return False
 
 # Module 6: Drive Ingestion Engine
-# Description: Uploads the chronologically verified local files into Google Drive.
+# Description: Uploads chronologically verified files to Drive.
 def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     file_metadata = {
         'name': folder_name,
-        'mimeType': 'application/vnd.google-apps.folder',
+        'mimeType': 'application/vnd.google\x2dapps.folder',
         'parents': [parent_id]
     }
     folder = drive_service.files().create(body=file_metadata, fields='id').execute()
@@ -145,7 +149,7 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     return created_id
 
 # Module 7: Main Workflow Engine
-# Description: Coordinates the extraction queue and executes the sequential downloading logic.
+# Description: Coordinates extraction queue and sequential downloads.
 def process_queue():
     gc, drive_service = get_google_services()
     sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -154,20 +158,28 @@ def process_queue():
     session = create_resilient_session()
 
     for idx, row in enumerate(records, start=2):
-        if row.get("Download Status") != "Pending":
+        status = str(row.get("Download Status", "")).strip()
+        if status != "Pending" and status != "":
             continue
         
         series_name = row.get("Series Title")
         chapter_num = row.get("Chapter Number")
         chapter_url = row.get("Direct Chapter Web URL")
         
+        error_msg = "Link doesn't work, find a new better link"
+        
         if not chapter_url or not str(chapter_url).startswith("http"):
+            queue_ws.update_cell(idx, 4, error_msg)
             continue
 
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
         os.makedirs(local_dir, exist_ok=True)
         
         panel_urls = extract_panels_with_playwright(chapter_url)
+        
+        if not panel_urls:
+            queue_ws.update_cell(idx, 4, error_msg)
+            continue
         
         sequenced_panels = []
         for url in panel_urls:
@@ -195,6 +207,8 @@ def process_queue():
             uploaded_id = upload_folder_to_drive(drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID)
             queue_ws.update_cell(idx, 4, "Downloaded")
             queue_ws.update_cell(idx, 5, f"Drive Folder ID: {uploaded_id}")
+        else:
+            queue_ws.update_cell(idx, 4, error_msg)
 
 if __name__ == "__main__":
     process_queue()
