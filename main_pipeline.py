@@ -173,32 +173,90 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
             drive_service.files().create(body=f_metadata, media_body=media, fields='id').execute()
     return created_id
 
-# Module 8: Staging Cleanup Engine
-# Description: Checks the Staging Tracker and permanently deletes folders marked as YES.
+# Module 8: Master Cleanup Engine
+# Description: Enforces strict URL-checking for Short-Form (Total Wipe) and Delivery verification for Long-Form (Surgical Wipe).
 def execute_staging_cleanup(gc, drive_service):
     try:
+        # Connect to your Master Tracker Sheet
         sheet = gc.open_by_key(SPREADSHEET_ID)
-        cleanup_ws = sheet.worksheet("Staging_Cleanup_Tracker")
-        cleanup_records = cleanup_ws.get_all_records()
-        
-        if not cleanup_records:
-            return
-            
-        headers = list(cleanup_records[0].keys())
-        target_col_index = headers.index("Ready to Delete?") + 1
-        
-        for c_idx, c_row in enumerate(cleanup_records, start=2):
-            ready = str(c_row.get("Ready to Delete?", "")).strip().upper()
-            folder_id = str(c_row.get("Staging Folder ID", "")).strip()
-            
-            if ready == "YES" and folder_id:
-                try:
-                    drive_service.files().delete(fileId=folder_id).execute()
-                    cleanup_ws.update_cell(c_idx, target_col_index, "PURGED")
-                except Exception:
-                    pass
-    except Exception:
-        pass
+
+        # ---------------------------------------------------------
+        # 1. SHORT-FORM: TOTAL WIPE PROTOCOL
+        # ---------------------------------------------------------
+        try:
+            # IMPORTANT: Change "Short_Tracker" to the exact name of your Shorts tab
+            short_ws = sheet.worksheet("Short_Tracker")
+            short_records = short_ws.get_all_records()
+
+            for c_idx, row in enumerate(short_records, start=2):
+                folder_id = str(row.get("Folder ID", "")).strip()
+                # IMPORTANT: Change "Video Link" to the exact column name holding your uploaded link
+                video_link = str(row.get("Video Link", "")).strip() 
+
+                # STRICT CONDITION: A valid HTTP link must be present
+                if folder_id and video_link.startswith("http"):
+                    try:
+                        # Total Wipe: Deletes the entire Drive folder and all raw images
+                        drive_service.files().delete(fileId=folder_id).execute()
+                        # Optional: Mark cell to prevent redundant API calls on next run
+                        # short_ws.update_cell(c_idx, list(row.keys()).index("Video Link") + 2, "PURGED")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Short Tracker Cleanup Error: {e}")
+
+        # ---------------------------------------------------------
+        # 2. LONG-FORM: SURGICAL WIPE PROTOCOL
+        # ---------------------------------------------------------
+        try:
+            # IMPORTANT: Change "Long_Tracker" to the exact name of your Long Form tab
+            long_ws = sheet.worksheet("Long_Tracker")
+            long_records = long_ws.get_all_records()
+
+            for c_idx, row in enumerate(long_records, start=2):
+                folder_id = str(row.get("Folder ID", "")).strip()
+                status = str(row.get("Status", "")).strip().upper()
+                chapter_name = str(row.get("Chapter Name", "")).strip()
+                safe_chapter = chapter_name.replace('.', '_').replace(' ', '_')
+
+                # STRICT CONDITION: The chapter must be officially delivered
+                if folder_id and status in ["DONE", "DELIVERED", "POSTED"]:
+                    
+                    # A. Surgical Folder Wipe (AI Leftovers Only)
+                    try:
+                        query = f"'{folder_id}' in parents and trashed = false"
+                        results = drive_service.files().list(q=query, fields="files(id, name)", pageSize=1000).execute()
+                        for f in results.get('files', []):
+                            fname = f['name']
+                            # Protects raw images: Deletes ONLY .json data and _map previews
+                            if fname.endswith('.json') or '_map' in fname:
+                                drive_service.files().delete(fileId=f['id']).execute()
+                    except Exception:
+                        pass
+
+                    # B. Script Vault Wipe
+                    try:
+                        # Locate the global Nexus_Script_Vault
+                        vault_query = "name = 'Nexus_Script_Vault' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+                        vault_results = drive_service.files().list(q=vault_query, fields="files(id)").execute()
+                        
+                        if vault_results.get('files'):
+                            vault_id = vault_results['files'][0]['id']
+                            script_filename = f"script_{safe_chapter}.json"
+                            
+                            # Locate and delete the specific chapter's backup
+                            script_query = f"'{vault_id}' in parents and name = '{script_filename}' and trashed = false"
+                            script_results = drive_service.files().list(q=script_query, fields="files(id)").execute()
+                            
+                            for sf in script_results.get('files', []):
+                                drive_service.files().delete(fileId=sf['id']).execute()
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Long Tracker Cleanup Error: {e}")
+
+    except Exception as e:
+        print(f"Master Cleanup Engine Failed: {e}")
 
 # Module 9: Main Workflow Engine
 # Description: Coordinates the extraction queue, downloading process, and cleanup phase.
