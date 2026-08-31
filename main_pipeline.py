@@ -1,3 +1,4 @@
+# OG
 import os
 import re
 import json
@@ -39,7 +40,7 @@ def get_google_services():
     return gc, drive_service
 
 # Module 2: Network Session Engine
-# Description: Creates a HTTP session with automatic retries.
+# Description: Creates a HTTP session with automatic retries for resilient downloading.
 def create_resilient_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -52,14 +53,14 @@ def create_resilient_session():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({
-        "User\x2dAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept\x2dLanguage": "en\x2dUS,en;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
     })
     return session
 
 # Module 3: Network Interception Engine
-# Description: Captures image URLs via browser rendering.
+# Description: Captures image URLs dynamically via headless browser rendering.
 def extract_panels_with_playwright(chapter_url):
     captured_urls = []
     seen = set()
@@ -74,7 +75,7 @@ def extract_panels_with_playwright(chapter_url):
         def handle_response(response):
             url = response.url
             if response.status == 200:
-                is_image = "image" in response.headers.get("content\x2dtype", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
+                is_image = "image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
                 if is_image and ("asura" in url or "chapter" in url or "comics" in url):
                     if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads']):
                         if url not in seen:
@@ -105,7 +106,7 @@ def extract_panels_with_playwright(chapter_url):
     return captured_urls
 
 # Module 4: Sequence Extraction Engine
-# Description: Parses the digits located exactly before the file extension.
+# Description: Parses strictly numerical digits located exactly before the file extension.
 def get_sequential_number(url):
     parsed = urlparse(url)
     filename = os.path.basename(parsed.path)
@@ -138,8 +139,8 @@ def filter_chronological_chain(sequenced_panels, max_gap=2):
     return valid_chain
 
 # Module 6: Verification Engine
-# Description: Validates bytes to discard corrupted files.
-def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
+# Description: Validates bytes to discard corrupted files and enforces a minimum size floor.
+def verify_and_save_image(image_bytes, target_path, min_size_kb=50):
     if len(image_bytes) < min_size_kb * 1024:
         return False
     try:
@@ -154,11 +155,11 @@ def verify_and_save_image(image_bytes, target_path, min_size_kb=10):
         return False
 
 # Module 7: Drive Ingestion Engine
-# Description: Uploads chronologically verified files to Drive.
+# Description: Uploads chronologically verified files to the Google Drive staging buffer.
 def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     file_metadata = {
         'name': folder_name,
-        'mimeType': 'application/vnd.google\x2dapps.folder',
+        'mimeType': 'application/vnd.google-apps.folder',
         'parents': [parent_id]
     }
     folder = drive_service.files().create(body=file_metadata, fields='id').execute()
@@ -172,8 +173,35 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
             drive_service.files().create(body=f_metadata, media_body=media, fields='id').execute()
     return created_id
 
-# Module 8: Main Workflow Engine
-# Description: Coordinates extraction queue and sequential downloads.
+# Module 8: Staging Cleanup Engine
+# Description: Checks the Staging Tracker and permanently deletes folders marked as YES.
+def execute_staging_cleanup(gc, drive_service):
+    try:
+        sheet = gc.open_by_key(SPREADSHEET_ID)
+        cleanup_ws = sheet.worksheet("Staging_Cleanup_Tracker")
+        cleanup_records = cleanup_ws.get_all_records()
+        
+        if not cleanup_records:
+            return
+            
+        headers = list(cleanup_records[0].keys())
+        target_col_index = headers.index("Ready to Delete?") + 1
+        
+        for c_idx, c_row in enumerate(cleanup_records, start=2):
+            ready = str(c_row.get("Ready to Delete?", "")).strip().upper()
+            folder_id = str(c_row.get("Staging Folder ID", "")).strip()
+            
+            if ready == "YES" and folder_id:
+                try:
+                    drive_service.files().delete(fileId=folder_id).execute()
+                    cleanup_ws.update_cell(c_idx, target_col_index, "PURGED")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# Module 9: Main Workflow Engine
+# Description: Coordinates the extraction queue, downloading process, and cleanup phase.
 def process_queue():
     gc, drive_service = get_google_services()
     sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -233,6 +261,8 @@ def process_queue():
             queue_ws.update_cell(idx, 5, f"Drive Folder ID: {uploaded_id}")
         else:
             queue_ws.update_cell(idx, 4, error_msg)
+            
+    execute_staging_cleanup(gc, drive_service)
 
 if __name__ == "__main__":
     process_queue()
