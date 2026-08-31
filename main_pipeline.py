@@ -260,6 +260,8 @@ def execute_staging_cleanup(gc, drive_service):
 
 # Module 9: Main Workflow Engine
 # Description: Coordinates the extraction queue, downloading process, and cleanup phase.
+# Module 9: Main Workflow Engine
+# Description: Coordinates the extraction queue, downloading process, and cleanup phase.
 def process_queue():
     gc, drive_service = get_google_services()
     sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -268,18 +270,25 @@ def process_queue():
     session = create_resilient_session()
 
     for idx, row in enumerate(records, start=2):
-        status = str(row.get("Download Status", "")).strip()
+        # Dynamically grabs the status regardless of long header names
+        status_key = next((k for k in row.keys() if "Download Status" in k), "Download Status")
+        status = str(row.get(status_key, "")).strip()
+        
         if status != "Pending" and status != "":
             continue
         
-        series_name = row.get("Series Title")
-        chapter_num = row.get("Chapter Number")
-        chapter_url = row.get("Direct Chapter Web URL")
+        series_name = row.get("Series Title", "")
+        chapter_num = row.get("Chapter Number", "")
+        chapter_url = row.get("Direct Chapter Web URL", "")
         
         error_msg = "Link doesn't work, find a new better link"
         
+        # COLUMN MAPPING (1-based index for Google Sheets):
+        # Col 5 = Download Status | Col 6 = Raw Staging Path | Col 8 = Link Notes
+        
         if not chapter_url or not str(chapter_url).startswith("http"):
-            queue_ws.update_cell(idx, 4, error_msg)
+            queue_ws.update_cell(idx, 5, "Error")
+            queue_ws.update_cell(idx, 8, error_msg)
             continue
 
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
@@ -288,7 +297,8 @@ def process_queue():
         panel_urls = extract_panels_with_playwright(chapter_url)
         
         if not panel_urls:
-            queue_ws.update_cell(idx, 4, error_msg)
+            queue_ws.update_cell(idx, 5, "Error")
+            queue_ws.update_cell(idx, 8, error_msg)
             continue
         
         raw_sequences = []
@@ -315,10 +325,12 @@ def process_queue():
         if success_count > 0:
             gdrive_name = f"{series_name}_Chapter_{chapter_num}"
             uploaded_id = upload_folder_to_drive(drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID)
-            queue_ws.update_cell(idx, 4, "Downloaded")
-            queue_ws.update_cell(idx, 5, f"Drive Folder ID: {uploaded_id}")
+            queue_ws.update_cell(idx, 5, "Downloaded")
+            queue_ws.update_cell(idx, 6, uploaded_id)
+            queue_ws.update_cell(idx, 8, "Link Verified")
         else:
-            queue_ws.update_cell(idx, 4, error_msg)
+            queue_ws.update_cell(idx, 5, "Error")
+            queue_ws.update_cell(idx, 8, error_msg)
             
     execute_staging_cleanup(gc, drive_service)
 
