@@ -1,4 +1,3 @@
-# OG
 import os
 import re
 import json
@@ -20,7 +19,6 @@ RAW_STAGING_FOLDER_ID = "1EGeKmI9y_7iV3Wu9LuTEJLk_5vTgZXpk"
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Module 1: Authentication Engine
-# Description: Authenticates Google Drive and Sheets using dual credentials.
 def get_google_services():
     sa_json_str = os.environ.get("NEXUS_DRIVE_CREDS")
     sa_info = json.loads(sa_json_str)
@@ -40,7 +38,6 @@ def get_google_services():
     return gc, drive_service
 
 # Module 2: Network Session Engine
-# Description: Creates a HTTP session with automatic retries for resilient downloading.
 def create_resilient_session():
     session = requests.Session()
     retry_strategy = Retry(
@@ -59,11 +56,9 @@ def create_resilient_session():
     })
     return session
 
-# Module 3: Network Interception Engine
-# Description: Captures image URLs dynamically via headless browser rendering.
+# Module 3: Network Interception Engine (DOM Ordered & Container Restricted)
 def extract_panels_with_playwright(chapter_url):
     captured_urls = []
-    seen = set()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -72,23 +67,13 @@ def extract_panels_with_playwright(chapter_url):
         )
         page = context.new_page()
 
-        def handle_response(response):
-            url = response.url
-            if response.status == 200:
-                is_image = "image" in response.headers.get("content-type", "") or any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
-                if is_image and ("asura" in url or "chapter" in url or "comics" in url):
-                    if not any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads']):
-                        if url not in seen:
-                            seen.add(url)
-                            captured_urls.append(url)
-
-        page.on("response", handle_response)
         try:
             page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
         except Exception:
             browser.close()
             return []
 
+        # Scroll to force lazy-loading
         last_height = page.evaluate("() => document.body.scrollHeight")
         no_change_count = 0
         while no_change_count < 5:
@@ -102,45 +87,36 @@ def extract_panels_with_playwright(chapter_url):
                 last_height = new_height
 
         page.wait_for_timeout(2500)
+
+        # TARGET THE READER AREA FIRST to exclude ads and sidebars
+        reader_selectors = ["#readerarea", ".reading-content", ".page-break", ".entry-content"]
+        target_container = None
+        
+        for selector in reader_selectors:
+            if page.query_selector(selector):
+                target_container = page.query_selector(selector)
+                break
+        
+        # Fallback to whole page if standard containers aren't found
+        image_elements = target_container.query_selector_all("img") if target_container else page.query_selector_all("img")
+        
+        for img in image_elements:
+            url = img.get_attribute("src") or img.get_attribute("data-src")
+            if url and url.startswith("http"):
+                is_valid_ext = any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])
+                is_manhwa_host = any(keyword in url.lower() for keyword in ["asura", "chapter", "comics", "wp-manga"])
+                is_noise = any(noise in url.lower() for noise in ['logo', 'icon', 'avatar', 'badge', 'banner', 'ads', 'discord'])
+                
+                if (is_valid_ext or is_manhwa_host) and not is_noise:
+                    if url not in captured_urls:
+                        captured_urls.append(url)
+
         browser.close()
     return captured_urls
 
-# Module 4: Sequence Extraction Engine
-# Description: Parses strictly numerical digits located exactly before the file extension.
-def get_sequential_number(url):
-    parsed = urlparse(url)
-    filename = os.path.basename(parsed.path)
-    match = re.search(r'(\d+)\.(?:jpg|jpeg|png|webp)$', filename, re.IGNORECASE)
-    if match:
-        seq = int(match.group(1))
-        return seq, filename
-    return -1, filename
-
-# Module 5: Continuity Filter Engine
-# Description: Builds an unbroken numerical chain and completely blocks massive erratic jumps.
-def filter_chronological_chain(sequenced_panels, max_gap=2):
-    if not sequenced_panels:
-        return []
-    
-    sequenced_panels.sort(key=lambda x: x[0])
-    valid_chain = [sequenced_panels[0]]
-    current_seq = sequenced_panels[0][0]
-    
-    for panel in sequenced_panels[1:]:
-        seq_num = panel[0]
-        jump = seq_num - current_seq
-        
-        if 0 <= jump <= max_gap:
-            valid_chain.append(panel)
-            current_seq = seq_num
-        elif jump > max_gap:
-            break
-            
-    return valid_chain
-
-# Module 6: Verification Engine
-# Description: Validates bytes to discard corrupted files and enforces a minimum size floor.
-def verify_and_save_image(image_bytes, target_path, min_size_kb=50):
+# Module 4: Verification Engine
+def verify_and_save_image(image_bytes, target_path, min_size_kb=20):
+    # Lowered size floor to 20kb to prevent deleting small story panels
     if len(image_bytes) < min_size_kb * 1024:
         return False
     try:
@@ -154,8 +130,7 @@ def verify_and_save_image(image_bytes, target_path, min_size_kb=50):
             os.remove(target_path)
         return False
 
-# Module 7: Drive Ingestion Engine
-# Description: Uploads chronologically verified files to the Google Drive staging buffer.
+# Module 5: Drive Ingestion Engine
 def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     file_metadata = {
         'name': folder_name,
@@ -173,95 +148,133 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
             drive_service.files().create(body=f_metadata, media_body=media, fields='id').execute()
     return created_id
 
-# Module 8: Master Cleanup Engine
-# Description: Enforces strict URL-checking for Short-Form (Total Wipe) and Delivery verification for Long-Form (Surgical Wipe).
+# Module 6: Relocation, Renaming & Purge Engine (Step 4)
+def execute_relocation(gc, drive_service):
+    try:
+        sheet = gc.open_by_key(SPREADSHEET_ID)
+        queue_ws = sheet.worksheet("Download_Queue")
+        records = queue_ws.get_all_records()
+
+        for idx, row in enumerate(records, start=2):
+            status_key = next((k for k in row.keys() if "Download Status" in k), "Download Status")
+            status = str(row.get(status_key, "")).strip().upper()
+
+            if status == "READY TO MOVE":
+                staging_id = str(row.get("Raw Staging Path", "")).strip()
+                target_id = str(row.get("Processed Dataset Path", "")).strip()
+                junk_notes = str(row.get("Link Notes", "")).strip()
+                rename_map_raw = str(row.get("Panel Sequence & Rename Map", "")).strip()
+
+                if not staging_id or not target_id:
+                    continue
+
+                try:
+                    rename_dict = {}
+                    if rename_map_raw:
+                        pairs = re.split(r'[,;\n]', rename_map_raw)
+                        for pair in pairs:
+                            if ':' in pair:
+                                k, v = pair.split(':', 1)
+                                rename_dict[k.strip()] = v.strip()
+                            elif '->' in pair:
+                                k, v = pair.split('->', 1)
+                                rename_dict[k.strip()] = v.strip()
+                            elif '=' in pair:
+                                k, v = pair.split('=', 1)
+                                rename_dict[k.strip()] = v.strip()
+
+                    query = f"'{staging_id}' in parents and trashed = false"
+                    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+                    files = results.get('files', [])
+
+                    junk_keywords = [j.strip() for j in junk_notes.split(',') if j.strip()]
+
+                    for f in files:
+                        f_id = f['id']
+                        f_name = f['name']
+                        is_junk = any(junk in f_name for junk in junk_keywords)
+
+                        if is_junk:
+                            drive_service.files().delete(fileId=f_id).execute()
+                        else:
+                            new_name = rename_dict.get(f_name, f_name)
+                            update_body = {'name': new_name} if new_name != f_name else None
+                            
+                            drive_service.files().update(
+                                fileId=f_id,
+                                addParents=target_id,
+                                removeParents=staging_id,
+                                body=update_body
+                            ).execute()
+
+                    drive_service.files().delete(fileId=staging_id).execute()
+                    queue_ws.update_cell(idx, 5, "Completed")
+                    queue_ws.update_cell(idx, 8, "Relocated, Renamed & Purged")
+
+                except Exception as e:
+                    print(f"Relocation Error for Row {idx}: {e}")
+                    
+    except Exception as e:
+        print(f"Relocation Engine Failed: {e}")
+
+# Module 7: Master Cleanup Engine (Step 5)
 def execute_staging_cleanup(gc, drive_service):
     try:
-        # Connect to your Master Tracker Sheet
         sheet = gc.open_by_key(SPREADSHEET_ID)
 
-        # ---------------------------------------------------------
         # 1. SHORT-FORM: TOTAL WIPE PROTOCOL
-        # ---------------------------------------------------------
         try:
-            # IMPORTANT: Change "Short_Tracker" to the exact name of your Shorts tab
             short_ws = sheet.worksheet("Short_Tracker")
             short_records = short_ws.get_all_records()
-
             for c_idx, row in enumerate(short_records, start=2):
                 folder_id = str(row.get("Folder ID", "")).strip()
-                # IMPORTANT: Change "Video Link" to the exact column name holding your uploaded link
                 video_link = str(row.get("Video Link", "")).strip() 
-
-                # STRICT CONDITION: A valid HTTP link must be present
                 if folder_id and video_link.startswith("http"):
                     try:
-                        # Total Wipe: Deletes the entire Drive folder and all raw images
                         drive_service.files().delete(fileId=folder_id).execute()
-                        # Optional: Mark cell to prevent redundant API calls on next run
-                        # short_ws.update_cell(c_idx, list(row.keys()).index("Video Link") + 2, "PURGED")
                     except Exception:
                         pass
         except Exception as e:
             print(f"Short Tracker Cleanup Error: {e}")
 
-        # ---------------------------------------------------------
         # 2. LONG-FORM: SURGICAL WIPE PROTOCOL
-        # ---------------------------------------------------------
         try:
-            # IMPORTANT: Change "Long_Tracker" to the exact name of your Long Form tab
             long_ws = sheet.worksheet("Long_Tracker")
             long_records = long_ws.get_all_records()
-
             for c_idx, row in enumerate(long_records, start=2):
                 folder_id = str(row.get("Folder ID", "")).strip()
                 status = str(row.get("Status", "")).strip().upper()
                 chapter_name = str(row.get("Chapter Name", "")).strip()
                 safe_chapter = chapter_name.replace('.', '_').replace(' ', '_')
 
-                # STRICT CONDITION: The chapter must be officially delivered
                 if folder_id and status in ["DONE", "DELIVERED", "POSTED"]:
-                    
-                    # A. Surgical Folder Wipe (AI Leftovers Only)
                     try:
                         query = f"'{folder_id}' in parents and trashed = false"
                         results = drive_service.files().list(q=query, fields="files(id, name)", pageSize=1000).execute()
                         for f in results.get('files', []):
                             fname = f['name']
-                            # Protects raw images: Deletes ONLY .json data and _map previews
                             if fname.endswith('.json') or '_map' in fname:
                                 drive_service.files().delete(fileId=f['id']).execute()
                     except Exception:
                         pass
-
-                    # B. Script Vault Wipe
                     try:
-                        # Locate the global Nexus_Script_Vault
                         vault_query = "name = 'Nexus_Script_Vault' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
                         vault_results = drive_service.files().list(q=vault_query, fields="files(id)").execute()
-                        
                         if vault_results.get('files'):
                             vault_id = vault_results['files'][0]['id']
                             script_filename = f"script_{safe_chapter}.json"
-                            
-                            # Locate and delete the specific chapter's backup
                             script_query = f"'{vault_id}' in parents and name = '{script_filename}' and trashed = false"
                             script_results = drive_service.files().list(q=script_query, fields="files(id)").execute()
-                            
                             for sf in script_results.get('files', []):
                                 drive_service.files().delete(fileId=sf['id']).execute()
                     except Exception:
                         pass
         except Exception as e:
             print(f"Long Tracker Cleanup Error: {e}")
-
     except Exception as e:
         print(f"Master Cleanup Engine Failed: {e}")
 
-# Module 9: Main Workflow Engine
-# Description: Coordinates the extraction queue, downloading process, and cleanup phase.
-# Module 9: Main Workflow Engine
-# Description: Coordinates the extraction queue, downloading process, and cleanup phase.
+# Module 8: Main Workflow Engine
 def process_queue():
     gc, drive_service = get_google_services()
     sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -270,21 +283,16 @@ def process_queue():
     session = create_resilient_session()
 
     for idx, row in enumerate(records, start=2):
-        # Dynamically grabs the status regardless of long header names
         status_key = next((k for k in row.keys() if "Download Status" in k), "Download Status")
-        status = str(row.get(status_key, "")).strip()
+        status = str(row.get(status_key, "")).strip().title()
         
-        if status != "Pending" and status != "":
+        if status != "Pending":
             continue
         
         series_name = row.get("Series Title", "")
         chapter_num = row.get("Chapter Number", "")
         chapter_url = row.get("Direct Chapter Web URL", "")
-        
         error_msg = "Link doesn't work, find a new better link"
-        
-        # COLUMN MAPPING (1-based index for Google Sheets):
-        # Col 5 = Download Status | Col 6 = Raw Staging Path | Col 8 = Link Notes
         
         if not chapter_url or not str(chapter_url).startswith("http"):
             queue_ws.update_cell(idx, 5, "Error")
@@ -301,17 +309,29 @@ def process_queue():
             queue_ws.update_cell(idx, 8, error_msg)
             continue
         
-        raw_sequences = []
-        for url in panel_urls:
-            seq, fname = get_sequential_number(url)
-            if seq >= 0:
-                raw_sequences.append((seq, fname, url))
-                
-        valid_panels = filter_chronological_chain(raw_sequences)
-        
         success_count = 0
-        for seq, original_fname, p_url in valid_panels:
-            target_path = os.path.join(local_dir, original_fname)
+        
+        # Tier 1: Smart Naming (Preserve Numbers, Rename Hashes)
+        for seq_idx, p_url in enumerate(panel_urls, start=1):
+            parsed = urlparse(p_url)
+            original_fname = os.path.basename(parsed.path)
+            base_name, ext = os.path.splitext(original_fname)
+            
+            # Normalize extension just in case URL formatting is weird
+            if not ext or ext.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
+                if ".png" in p_url.lower(): ext = ".png"
+                elif ".webp" in p_url.lower(): ext = ".webp"
+                else: ext = ".jpg"
+
+            # STRICT CHECK: If the name is pure numbers (e.g., "01", "002"), keep it.
+            # If it contains letters (e.g., "cf6105", "page_1"), rename it sequentially.
+            if base_name.isdigit():
+                final_fname = f"{base_name}{ext}"
+            else:
+                final_fname = f"{seq_idx:03d}{ext}"
+            
+            target_path = os.path.join(local_dir, final_fname)
+            
             try:
                 session.headers["Referer"] = chapter_url
                 p_resp = session.get(p_url, timeout=25)
@@ -325,13 +345,15 @@ def process_queue():
         if success_count > 0:
             gdrive_name = f"{series_name}_Chapter_{chapter_num}"
             uploaded_id = upload_folder_to_drive(drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID)
+            
             queue_ws.update_cell(idx, 5, "Downloaded")
             queue_ws.update_cell(idx, 6, uploaded_id)
-            queue_ws.update_cell(idx, 8, "Link Verified")
+            queue_ws.update_cell(idx, 8, "Awaiting Assistant Audit")
         else:
             queue_ws.update_cell(idx, 5, "Error")
             queue_ws.update_cell(idx, 8, error_msg)
             
+    execute_relocation(gc, drive_service)
     execute_staging_cleanup(gc, drive_service)
 
 if __name__ == "__main__":
