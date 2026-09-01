@@ -233,6 +233,7 @@ def get_or_create_target_folder(
 
 
 # Module 6: Relocation Engine
+# Module 6: Relocation Engine
 def execute_relocation(gc, drive_service):
     try:
         sheet = gc.open_by_key(SPREADSHEET_ID)
@@ -249,12 +250,16 @@ def execute_relocation(gc, drive_service):
                 chapter_num = str(row.get("Chapter Number", "")).strip()
                 format_type = str(row.get("Format (Long / Short)", "")).strip().lower()
                 is_short = "short" in format_type
+                
+                # GET JUNK NOTES AND RENAME MAP
                 rename_map_raw = str(row.get("Panel Sequence & Rename Map", "")).strip()
+                junk_notes = str(row.get("Link Notes", "")).strip()
 
                 if not staging_id:
                     continue
 
                 try:
+                    # RESTORED MISSING CODE: Create target folder, build rename dict, and fetch files
                     target_folder_id = get_or_create_target_folder(
                         drive_service, series_name, chapter_num, is_short
                     )
@@ -274,18 +279,23 @@ def execute_relocation(gc, drive_service):
                                 rename_dict[k.strip()] = v.strip()
 
                     query = f"'{staging_id}' in parents and trashed = false"
-                    results = (
-                        drive_service.files()
-                        .list(q=query, fields="files(id, name)")
-                        .execute()
-                    )
+                    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
                     files = results.get("files", [])
 
                     for f in files:
                         f_id = f['id']
                         f_name = f['name']
                         
-                        # Apply rename mapping if the filename exists in the dictionary
+                        # Check if the file is flagged as junk by the Assistant
+                        junk_keywords = [j.strip() for j in junk_notes.split(',') if j.strip()]
+                        is_junk = any(junk in f_name for junk in junk_keywords)
+
+                        if is_junk:
+                            # Delete the junk file and skip the rest of the loop
+                            drive_service.files().delete(fileId=f_id).execute()
+                            continue
+                        
+                        # Apply rename mapping if it is a valid panel
                         new_name = rename_dict.get(f_name, f_name)
                         update_body = {'name': new_name} if new_name != f_name else None
                         
@@ -299,10 +309,11 @@ def execute_relocation(gc, drive_service):
                     # Delete empty staging folder after move
                     drive_service.files().delete(fileId=staging_id).execute()
 
-                    # Update Download Status to Sorted & Relocated and clear staging ID
+                    # Update Download Status and clear staging ID
                     queue_ws.update_cell(idx, 5, "Sorted & Relocated")
                     queue_ws.update_cell(idx, 6, "")
-                    queue_ws.update_cell(idx, 9, "Ready for Processing")
+                    # FIX: Shifted to Column 10 (Link Notes)
+                    queue_ws.update_cell(idx, 10, "Ready for Processing")
                 except Exception as e:
                     print(f"Relocation Error for Row {idx} ({series_name}): {e}")
 
@@ -398,11 +409,9 @@ def process_queue():
         # Pass it to Playwright
         panel_urls = extract_panels_with_playwright(chapter_url, custom_selector=custom_css)
 
-        if not panel_urls:
+       if not panel_urls:
             queue_ws.update_cell(idx, 5, "Error")
-            # Alert the Assistant that the container changed or is missing
-            # (Ensure Column 9 matches your 'Link Notes' or status column)
-            queue_ws.update_cell(idx, 9, "Container not found. Assistant please provide Custom CSS Selector.")
+            queue_ws.update_cell(idx, 10, "Container not found. Assistant please provide Custom CSS Selector.") # Changed to 10
             continue
 
         success_count = 0
@@ -442,13 +451,12 @@ def process_queue():
                 drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID
             )
 
-            # FIX: Only set to Downloaded. Forces the 2-step workflow so you can audit it.
             queue_ws.update_cell(idx, 5, "Downloaded")
             queue_ws.update_cell(idx, 6, uploaded_id)
-            queue_ws.update_cell(idx, 9, "Awaiting Assistant Audit")
+            queue_ws.update_cell(idx, 10, "Awaiting Assistant Audit") # Changed to 10
         else:
             queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 9, error_msg)
+            queue_ws.update_cell(idx, 10, error_msg) # Changed to 10
 
     # Note: Relocation and Cleanup are deliberately decoupled from the process_queue loop
 
