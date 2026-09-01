@@ -63,16 +63,19 @@ def create_resilient_session():
     return session
 
 
-# Module 3: Strict Story Panel Interception
-def extract_panels_with_playwright(chapter_url):
+DOMAIN_PRESETS = {
+    "asurascans.com": 'img[alt*="Page"], div[class*="chapter"] img',
+    "demonicscans.org": "#readerarea img",
+    "mangadex.org": ".reader--container img",
+    "hivetoons.org": ".reading-content img",
+    "en-thunderscans.com": "#readerarea img",
+}
+
+def extract_panels_with_playwright(chapter_url, custom_selector=""):
     captured_urls = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            viewport={"width": 1280, "height": 1080},
-        )
-        page = context.new_page()
+        page = browser.new_page(viewport={"width": 1280, "height": 1080})
 
         try:
             page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
@@ -80,81 +83,96 @@ def extract_panels_with_playwright(chapter_url):
             browser.close()
             return []
 
-        # Scroll to force lazy loading
-        last_height = page.evaluate("() => document.body.scrollHeight")
-        no_change_count = 0
-        while no_change_count < 5:
-            page.evaluate("() => window.scrollBy(0, 1500)")
+        # Scroll down to trigger lazy loading
+        for _ in range(5):
+            page.evaluate("window.scrollBy(0, 1500)")
             time.sleep(0.4)
-            new_height = page.evaluate("() => document.body.scrollHeight")
-            if new_height == last_height:
-                no_change_count += 1
-            else:
-                no_change_count = 0
-                last_height = new_height
-
         page.wait_for_timeout(2000)
 
-        # FIX: Target reader area strictly to exclude noise. No fallback to full page.
-        reader_selectors = [
-            "#readerarea",
-            ".reading-content",
-            ".page-break",
-            ".entry-content",
-        ]
-        target_container = None
+        # ---------------------------------------------------------
+        # 3-TIER SELECTOR TARGETING
+        # ---------------------------------------------------------
+        selector = custom_selector.strip()
+        
+        # Tier 2: If no custom selector from sheet, check Domain Presets
+        if not selector:
+            for domain, preset in DOMAIN_PRESETS.items():
+                if domain in chapter_url.lower():
+                    selector = preset
+                    break
 
-        for selector in reader_selectors:
-            if page.query_selector(selector):
-                target_container = page.query_selector(selector)
-                break
+        image_elements = []
+        if selector:
+            image_elements = page.query_selector_all(selector)
 
-        # STRICT ABORT: If no comic container is found, abort to prevent downloading 200+ junk images
-        if not target_container:
+        # Tier 3: Fallback to standard CMS selectors if still empty
+        if not image_elements:
+            for fallback in ["#readerarea img", ".reading-content img", ".entry-content img"]:
+                image_elements = page.query_selector_all(fallback)
+                if image_elements:
+                    break
+
+        # STRICT ABORT: If no reader container images found, abort to alert assistant
+        if not image_elements:
             browser.close()
             return []
 
-        # Query all images ONLY inside the comic container
-        image_elements = target_container.query_selector_all("img")
-
+        # ---------------------------------------------------------
+        # VALIDATION & JUNK FILTERING (Added Extra Security)
+        # ---------------------------------------------------------
         for img in image_elements:
             url = img.get_attribute("src") or img.get_attribute("data-src")
             if not url or not url.startswith("http"):
                 continue
 
             url_lower = url.lower()
-
-            # FIX: Explicitly require chapter pathways and ban avatars/covers/users
-            is_valid_ext = any(
-                ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".webp"]
-            )
             
-            # SMART ENGINE: Comprehensive negative filter to ban UI junk elements
+            is_valid_ext = any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".webp"])
+            
+            # Keep the robust negative filter we built to block any UI elements that slip in
             is_junk = any(
                 noise in url_lower
                 for noise in [
                     "avatar", "user", "users", "logo", "icon", "badge", 
                     "banner", "ads", "discord", "cover", "comment", 
-                    "sidebar", "widget", "sponsor", "paypal", "patreon","profiles"
+                    "sidebar", "widget", "sponsor", "paypal", "patreon"
                 ]
             )
 
-            # Because we already isolated the 'target_container' (the comic reader area),
-            # any valid image format inside it that IS NOT explicitly junk is safely assumed to be a panel.
             if is_valid_ext and not is_junk:
                 if url not in captured_urls:
                     captured_urls.append(url)
 
+        browser.close()
+    return captured_urls
+
 
 # Module 4: Verification Engine
 # FIX: Removed min_size_kb filter completely so small story panels aren't skipped
+# Module 4: Dynamic Geometric Verification Engine
 def verify_and_save_image(image_bytes, target_path):
     try:
+        from io import BytesIO
+        # Open in RAM to check dimensions first
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.verify() 
+        
+        with Image.open(BytesIO(image_bytes)) as img:
+            width, height = img.size
+            
+            # RULE 1: Reject small icons, avatars, and UI buttons (too narrow or too short)
+            if width < 400 or height < 300:
+                return False
+                
+            # RULE 2: Reject horizontal banner ads (extremely wide but short)
+            if width > (height * 2.5):
+                return False
+
+        # If it matches the shape of a tall story panel, save it
         with open(target_path, "wb") as f:
             f.write(image_bytes)
-        with Image.open(target_path) as img:
-            img.verify()
         return True
+
     except Exception:
         if os.path.exists(target_path):
             os.remove(target_path)
@@ -371,21 +389,20 @@ def process_queue():
         chapter_url = row.get("Direct Chapter Web URL", "")
         error_msg = "Link doesn't work, find a new better link"
 
-        if not chapter_url or not str(chapter_url).startswith("http"):
-            queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 9, error_msg)
-            continue
-
-        local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(
-            " ", "_"
-        )
+        local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
         os.makedirs(local_dir, exist_ok=True)
 
-        panel_urls = extract_panels_with_playwright(chapter_url)
+        # Pull the exact CSS Selector from the new spreadsheet column
+        custom_css = str(row.get("Custom CSS Selector", "")).strip()
+
+        # Pass it to Playwright
+        panel_urls = extract_panels_with_playwright(chapter_url, custom_selector=custom_css)
 
         if not panel_urls:
             queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 9, error_msg)
+            # Alert the Assistant that the container changed or is missing
+            # (Ensure Column 9 matches your 'Link Notes' or status column)
+            queue_ws.update_cell(idx, 9, "Container not found. Assistant please provide Custom CSS Selector.")
             continue
 
         success_count = 0
