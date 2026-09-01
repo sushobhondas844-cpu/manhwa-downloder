@@ -408,8 +408,7 @@ def process_queue():
 
         # Pass it to Playwright
         panel_urls = extract_panels_with_playwright(chapter_url, custom_selector=custom_css)
-
-       if not panel_urls:
+        if not panel_urls:
             queue_ws.update_cell(idx, 5, "Error")
             queue_ws.update_cell(idx, 10, "Container not found. Assistant please provide Custom CSS Selector.") # Changed to 10
             continue
