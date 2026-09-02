@@ -71,28 +71,18 @@ DOMAIN_PRESETS = {
     "en-thunderscans.com": "#readerarea img",
 }
 
-def extract_panels_with_playwright(chapter_url, custom_selector=""):
+def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
+    success_count = 0
     captured_urls = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 1080})
 
         try:
-            print(f"[DEBUG] Navigating to: {chapter_url}")
-            response = page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
-            print(f"[DEBUG] HTTP Status: {response.status if response else 'None'}")
-            print(f"[DEBUG] Page Title: '{page.title()}'")
-            page.screenshot(path="debug_browser_view.png")
-            print("[DEBUG] Saved debug_browser_view.png")
-        except Exception as e:
-            print(f"[DEBUG] Navigation crashed: {e}")
+            page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
             browser.close()
-            return []
-
-        if "just a moment" in page.title().lower() or "attention required" in page.title().lower():
-            print("[DEBUG] BLOCKED by Cloudflare bot protection!")
-            browser.close()
-            return []
+            return 0
 
         # Scroll down to trigger lazy loading
         for _ in range(5):
@@ -100,12 +90,7 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
             time.sleep(0.4)
         page.wait_for_timeout(2000)
 
-        # ---------------------------------------------------------
-        # 3-TIER SELECTOR TARGETING
-        # ---------------------------------------------------------
         selector = custom_selector.strip()
-        
-        # Tier 2: If no custom selector from sheet, check Domain Presets
         if not selector:
             for domain, preset in DOMAIN_PRESETS.items():
                 if domain in chapter_url.lower():
@@ -116,50 +101,33 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
         if selector:
             image_elements = page.query_selector_all(selector)
 
-        # Tier 3: Fallback to standard CMS selectors if still empty
         if not image_elements:
             for fallback in ["#readerarea img", ".reading-content img", ".entry-content img"]:
                 image_elements = page.query_selector_all(fallback)
                 if image_elements:
                     break
 
-        # STRICT ABORT: If no reader container images found, abort to alert assistant
-        # LAST RESORT FALLBACK: Scan the entire webpage. 
-        # The Geometric Engine (Module 4) will automatically filter out the junk avatars and ads.
+        # LAST RESORT FALLBACK
         if not image_elements:
             image_elements = page.query_selector_all("img")
-            
-        print(f"[DEBUG] Found {len(image_elements)} raw image elements.")
-        
-        if image_elements:
-            first_img = image_elements[0]
-            print(f"[DEBUG] First img src: {first_img.get_attribute('src')}")
-            print(f"[DEBUG] First img data-src: {first_img.get_attribute('data-src')}")
-            print(f"[DEBUG] First img data-lazy-src: {first_img.get_attribute('data-lazy-src')}")
-            print(f"[DEBUG] First img data-original: {first_img.get_attribute('data-original')}")
 
-        # LAST RESORT FALLBACK: If missing, scan the whole page.
         if not image_elements:
-            print("[DEBUG] Container missing. Falling back to full page scan.")
-            image_elements = page.query_selector_all("img")
-            
-        if not image_elements:
-            print("[DEBUG] Still 0 images found. Aborting.")
             browser.close()
-            return []
+            return 0
 
-        # ---------------------------------------------------------
-        # VALIDATION & JUNK FILTERING (Added Extra Security)
-        # ---------------------------------------------------------
+        seq_idx = 1
         for img in image_elements:
-            url = img.get_attribute("src") or img.get_attribute("data-src")
+            # Expanded attribute check for WordPress Lazy-Load themes
+            url = (img.get_attribute("src") or 
+                   img.get_attribute("data-src") or 
+                   img.get_attribute("data-lazy-src") or 
+                   img.get_attribute("data-original"))
+                   
             if not url or not url.startswith("http"):
                 continue
 
             url_lower = url.lower()
-            
             is_valid_ext = any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".webp"])
-            
             is_junk = any(
                 noise in url_lower
                 for noise in [
@@ -169,13 +137,39 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
                 ]
             )
 
-            # Pure Dynamic Check: If it is an image and isn't UI junk, keep it.
             if is_valid_ext and not is_junk:
                 if url not in captured_urls:
                     captured_urls.append(url)
 
+                    # Smart Naming 
+                    parsed = urlparse(url)
+                    original_fname = os.path.basename(parsed.path)
+                    base_name, ext = os.path.splitext(original_fname)
+
+                    if not ext or ext.lower() not in [".jpg", ".jpeg", ".png", ".webp"]:
+                        ext = ".webp" if ".webp" in url_lower else ".jpg"
+
+                    if base_name.isdigit():
+                        final_fname = f"{int(base_name):03d}{ext}"
+                    else:
+                        final_fname = f"{seq_idx:03d}{ext}"
+
+                    target_path = os.path.join(local_dir, final_fname)
+
+                    # NATIVE PLAYWRIGHT DOWNLOAD (Bypasses 'requests' blocking)
+                    try:
+                        resp = page.request.get(url, headers={"Referer": chapter_url}, timeout=25000)
+                        if resp.status == 200:
+                            image_bytes = resp.body()
+                            if verify_and_save_image(image_bytes, target_path):
+                                success_count += 1
+                                seq_idx += 1
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
+
         browser.close()
-    return captured_urls
+    return success_count
 
 
 # Module 4: Verification Engine
@@ -235,13 +229,18 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
 
 
 # Helper with escaped single quotes for Google Drive queries
+# Helper with escaped single quotes for Google Drive queries
 def get_or_create_target_folder(
     drive_service, series_name, chapter_num, is_short=True
 ):
     parent_id = SHORT_FORM_ROOT_ID if is_short else LONG_FORM_ROOT_ID
-    target_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
     
-    # FIX: Escape single quotes so titles like "The Berserker's" don't trigger Error 400
+    # FIX: Isolate Short-Form titles so they merge into existing global folders
+    if is_short:
+        target_name = series_name
+    else:
+        target_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
+        
     safe_target_name = target_name.replace("'", "\\'")
 
     query = (
@@ -261,7 +260,6 @@ def get_or_create_target_folder(
     }
     folder = drive_service.files().create(body=meta, fields="id").execute()
     return folder.get("id")
-
 
 # Module 6: Relocation Engine
 # Module 6: Relocation Engine
@@ -418,7 +416,6 @@ def process_queue():
     sheet = gc.open_by_key(SPREADSHEET_ID)
     queue_ws = sheet.worksheet("Download_Queue")
     records = queue_ws.get_all_records()
-    session = create_resilient_session()
 
     for idx, row in enumerate(records, start=2):
         status = str(row.get("Download Status", "")).strip().title()
@@ -431,62 +428,31 @@ def process_queue():
         chapter_url = row.get("Direct Chapter Web URL", "")
         error_msg = "Link doesn't work, find a new better link"
 
+        if not chapter_url or not str(chapter_url).startswith("http"):
+            queue_ws.update_cell(idx, 5, "Error")
+            queue_ws.update_cell(idx, 10, error_msg)
+            continue
+
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
         os.makedirs(local_dir, exist_ok=True)
 
-        # Pull the exact CSS Selector from the new spreadsheet column
         custom_css = str(row.get("Custom CSS Selector", "")).strip()
 
-        # Pass it to Playwright
-        panel_urls = extract_panels_with_playwright(chapter_url, custom_selector=custom_css)
-        if not panel_urls:
-            queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 10, "Container not found. Assistant please provide Custom CSS Selector.") # Changed to 10
-            continue
-
-        success_count = 0
-
-        # Smart Naming: Keep chronological numbers, rename hashes
-        for seq_idx, p_url in enumerate(panel_urls, start=1):
-            parsed = urlparse(p_url)
-            original_fname = os.path.basename(parsed.path)
-            base_name, ext = os.path.splitext(original_fname)
-
-            if not ext or ext.lower() not in [".jpg", ".jpeg", ".png", ".webp"]:
-                ext = ".webp" if ".webp" in p_url.lower() else ".jpg"
-
-            # Check if name is purely numerical to avoid altering natively clean names
-            if base_name.isdigit():
-                final_fname = f"{int(base_name):03d}{ext}"
-            else:
-                final_fname = f"{seq_idx:03d}{ext}"
-
-            target_path = os.path.join(local_dir, final_fname)
-
-            try:
-                session.headers["Referer"] = chapter_url
-                p_resp = session.get(p_url, timeout=25)
-                if p_resp.status_code == 200:
-                    if verify_and_save_image(p_resp.content, target_path):
-                        success_count += 1
-            except Exception:
-                pass
-            time.sleep(0.05)
+        # Playwright now handles extraction AND downloading, returning the success count directly
+        success_count = extract_panels_with_playwright(chapter_url, local_dir, custom_selector=custom_css)
 
         if success_count > 0:
-            gdrive_name = (
-                f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
-            )
+            gdrive_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
             uploaded_id = upload_folder_to_drive(
                 drive_service, local_dir, gdrive_name, RAW_STAGING_FOLDER_ID
             )
 
             queue_ws.update_cell(idx, 5, "Downloaded")
             queue_ws.update_cell(idx, 6, uploaded_id)
-            queue_ws.update_cell(idx, 10, "Awaiting Assistant Audit") # Changed to 10
+            queue_ws.update_cell(idx, 10, "Awaiting Assistant Audit")
         else:
             queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 10, error_msg) # Changed to 10
+            queue_ws.update_cell(idx, 10, "Container missing or download blocked. Assistant please verify.")
 
     # Note: Relocation and Cleanup are deliberately decoupled from the process_queue loop
 
