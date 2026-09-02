@@ -129,7 +129,6 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
             
             is_valid_ext = any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".webp"])
             
-            # Keep the robust negative filter we built to block any UI elements that slip in
             is_junk = any(
                 noise in url_lower
                 for noise in [
@@ -139,6 +138,7 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
                 ]
             )
 
+            # Pure Dynamic Check: If it is an image and isn't UI junk, keep it.
             if is_valid_ext and not is_junk:
                 if url not in captured_urls:
                     captured_urls.append(url)
