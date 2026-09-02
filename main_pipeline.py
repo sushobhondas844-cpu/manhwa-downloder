@@ -78,8 +78,19 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
         page = browser.new_page(viewport={"width": 1280, "height": 1080})
 
         try:
-            page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
-        except Exception:
+            print(f"[DEBUG] Navigating to: {chapter_url}")
+            response = page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
+            print(f"[DEBUG] HTTP Status: {response.status if response else 'None'}")
+            print(f"[DEBUG] Page Title: '{page.title()}'")
+            page.screenshot(path="debug_browser_view.png")
+            print("[DEBUG] Saved debug_browser_view.png")
+        except Exception as e:
+            print(f"[DEBUG] Navigation crashed: {e}")
+            browser.close()
+            return []
+
+        if "just a moment" in page.title().lower() or "attention required" in page.title().lower():
+            print("[DEBUG] BLOCKED by Cloudflare bot protection!")
             browser.close()
             return []
 
@@ -113,7 +124,27 @@ def extract_panels_with_playwright(chapter_url, custom_selector=""):
                     break
 
         # STRICT ABORT: If no reader container images found, abort to alert assistant
+        # LAST RESORT FALLBACK: Scan the entire webpage. 
+        # The Geometric Engine (Module 4) will automatically filter out the junk avatars and ads.
         if not image_elements:
+            image_elements = page.query_selector_all("img")
+            
+        print(f"[DEBUG] Found {len(image_elements)} raw image elements.")
+        
+        if image_elements:
+            first_img = image_elements[0]
+            print(f"[DEBUG] First img src: {first_img.get_attribute('src')}")
+            print(f"[DEBUG] First img data-src: {first_img.get_attribute('data-src')}")
+            print(f"[DEBUG] First img data-lazy-src: {first_img.get_attribute('data-lazy-src')}")
+            print(f"[DEBUG] First img data-original: {first_img.get_attribute('data-original')}")
+
+        # LAST RESORT FALLBACK: If missing, scan the whole page.
+        if not image_elements:
+            print("[DEBUG] Container missing. Falling back to full page scan.")
+            image_elements = page.query_selector_all("img")
+            
+        if not image_elements:
+            print("[DEBUG] Still 0 images found. Aborting.")
             browser.close()
             return []
 
