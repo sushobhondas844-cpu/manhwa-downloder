@@ -137,8 +137,8 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
             is_junk = any(
                 noise in url_lower
                 for noise in [
-                    "avatar", "user", "users", "logo", "icon", "badge", 
-                    "banner", "ads", "discord", "cover", "comment", 
+                    "avatar", "user", "users", "logo", "/icon/", "badge", 
+                    "banner", "/ads/", "discord", "cover", "comment", 
                     "sidebar", "widget", "sponsor", "paypal", "patreon"
                 ]
             )
