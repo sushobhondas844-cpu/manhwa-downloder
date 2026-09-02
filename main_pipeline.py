@@ -79,8 +79,13 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
         page = browser.new_page(viewport={"width": 1280, "height": 1080})
 
         try:
+            print(f"[DEBUG] Navigating to: {chapter_url}")
             page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
-        except Exception:
+            # RESTORED SCREENSHOT
+            page.screenshot(path="debug_browser_view.png")
+            print("[DEBUG] Saved debug_browser_view.png")
+        except Exception as e:
+            print(f"[DEBUG] Navigation crashed: {e}")
             browser.close()
             return 0
 
@@ -111,13 +116,14 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
         if not image_elements:
             image_elements = page.query_selector_all("img")
 
+        print(f"[DEBUG] Found {len(image_elements)} raw image elements.")
+
         if not image_elements:
             browser.close()
             return 0
 
         seq_idx = 1
         for img in image_elements:
-            # Expanded attribute check for WordPress Lazy-Load themes
             url = (img.get_attribute("src") or 
                    img.get_attribute("data-src") or 
                    img.get_attribute("data-lazy-src") or 
@@ -141,7 +147,6 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
                 if url not in captured_urls:
                     captured_urls.append(url)
 
-                    # Smart Naming 
                     parsed = urlparse(url)
                     original_fname = os.path.basename(parsed.path)
                     base_name, ext = os.path.splitext(original_fname)
@@ -156,21 +161,26 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
 
                     target_path = os.path.join(local_dir, final_fname)
 
-                    # NATIVE PLAYWRIGHT DOWNLOAD (Bypasses 'requests' blocking)
+                    # LOGGING THE DOWNLOAD ATTEMPT
                     try:
+                        print(f"[DEBUG] Fetching: {url}")
                         resp = page.request.get(url, headers={"Referer": chapter_url}, timeout=25000)
+                        print(f"[DEBUG] Status: {resp.status}")
+                        
                         if resp.status == 200:
                             image_bytes = resp.body()
                             if verify_and_save_image(image_bytes, target_path):
                                 success_count += 1
                                 seq_idx += 1
-                    except Exception:
-                        pass
+                            else:
+                                print(f"[DEBUG] Failed geometric check: width/height too small.")
+                    except Exception as e:
+                        print(f"[DEBUG] Download crashed: {e}")
                     time.sleep(0.05)
 
+        print(f"[DEBUG] Total successful downloads for this chapter: {success_count}")
         browser.close()
     return success_count
-
 
 # Module 4: Verification Engine
 # FIX: Removed min_size_kb filter completely so small story panels aren't skipped
