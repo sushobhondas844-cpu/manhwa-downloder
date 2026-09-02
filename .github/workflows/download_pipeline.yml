@@ -31,3 +31,11 @@ jobs:
           DRIVE_OAUTH_TOKEN: ${{ secrets.DRIVE_OAUTH_TOKEN }}
         run: |
           python main_pipeline.py
+
+      - name: Upload Debug Screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-debug-screenshot
+          path: debug_browser_view.png
+          retention-days: 3
