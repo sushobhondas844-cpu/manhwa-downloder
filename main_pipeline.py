@@ -74,6 +74,7 @@ DOMAIN_PRESETS = {
 def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
     success_count = 0
     captured_urls = []
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 1080})
@@ -81,15 +82,18 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
         try:
             print(f"[DEBUG] Navigating to: {chapter_url}")
             page.goto(chapter_url, wait_until="domcontentloaded", timeout=60000)
-            # RESTORED SCREENSHOT
             page.screenshot(path="debug_browser_view.png")
             print("[DEBUG] Saved debug_browser_view.png")
         except Exception as e:
             print(f"[DEBUG] Navigation crashed: {e}")
             browser.close()
-            return 0
+            return 0, "Navigation crashed or timed out."
 
-        # Scroll down to trigger lazy loading
+        page_title = page.title().lower()
+        if "just a moment" in page_title or "attention required" in page_title or "turnstile" in page.content().lower():
+            browser.close()
+            return 0, "Cloudflare protection active. Use a different website."
+
         for _ in range(5):
             page.evaluate("window.scrollBy(0, 1500)")
             time.sleep(0.4)
@@ -112,15 +116,12 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
                 if image_elements:
                     break
 
-        # LAST RESORT FALLBACK
         if not image_elements:
             image_elements = page.query_selector_all("img")
 
-        print(f"[DEBUG] Found {len(image_elements)} raw image elements.")
-
         if not image_elements:
             browser.close()
-            return 0
+            return 0, "Container missing. Please update CSS selector."
 
         seq_idx = 1
         for img in image_elements:
@@ -161,26 +162,23 @@ def extract_panels_with_playwright(chapter_url, local_dir, custom_selector=""):
 
                     target_path = os.path.join(local_dir, final_fname)
 
-                    # LOGGING THE DOWNLOAD ATTEMPT
                     try:
-                        print(f"[DEBUG] Fetching: {url}")
                         resp = page.request.get(url, headers={"Referer": chapter_url}, timeout=25000)
-                        print(f"[DEBUG] Status: {resp.status}")
-                        
                         if resp.status == 200:
                             image_bytes = resp.body()
                             if verify_and_save_image(image_bytes, target_path):
                                 success_count += 1
                                 seq_idx += 1
-                            else:
-                                print(f"[DEBUG] Failed geometric check: width/height too small.")
-                    except Exception as e:
-                        print(f"[DEBUG] Download crashed: {e}")
+                    except Exception:
+                        pass
                     time.sleep(0.05)
 
-        print(f"[DEBUG] Total successful downloads for this chapter: {success_count}")
         browser.close()
-    return success_count
+        
+        if success_count == 0:
+            return 0, "Images found but download blocked or geometric check failed."
+            
+    return success_count, "Success"
 
 # Module 4: Verification Engine
 # FIX: Removed min_size_kb filter completely so small story panels aren't skipped
@@ -240,36 +238,71 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
 
 # Helper with escaped single quotes for Google Drive queries
 # Helper with escaped single quotes for Google Drive queries
-def get_or_create_target_folder(
-    drive_service, series_name, chapter_num, is_short=True
-):
-    parent_id = SHORT_FORM_ROOT_ID if is_short else LONG_FORM_ROOT_ID
-    
-    # FIX: Isolate Short-Form titles so they merge into existing global folders
+def get_or_create_target_folder(drive_service, series_name, chapter_num, is_short=True):
     if is_short:
+        parent_id = SHORT_FORM_ROOT_ID
         target_name = series_name
-    else:
-        target_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
+        safe_target_name = target_name.replace("'", "\\'")
+
+        query = (
+            f"'{parent_id}' in parents and name = '{safe_target_name}' and mimeType ="
+            " 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        results = drive_service.files().list(q=query, fields="files(id)").execute()
+        files = results.get("files", [])
         
-    safe_target_name = target_name.replace("'", "\\'")
-
-    query = (
-        f"'{parent_id}' in parents and name = '{safe_target_name}' and mimeType ="
-        " 'application/vnd.google-apps.folder' and trashed = false"
-    )
-    results = drive_service.files().list(q=query, fields="files(id)").execute()
-    files = results.get("files", [])
-
-    if files:
-        return files[0]["id"]
-
-    meta = {
-        "name": target_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    folder = drive_service.files().create(body=meta, fields="id").execute()
-    return folder.get("id")
+        if files:
+            return files[0]["id"]
+            
+        meta = {
+            "name": target_name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        }
+        folder = drive_service.files().create(body=meta, fields="id").execute()
+        return folder.get("id")
+    else:
+        parent_id = LONG_FORM_ROOT_ID
+        series_name_safe = series_name.replace("'", "\\'")
+        
+        series_query = (
+            f"'{parent_id}' in parents and name = '{series_name_safe}' and mimeType ="
+            " 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        series_results = drive_service.files().list(q=series_query, fields="files(id)").execute()
+        series_files = series_results.get("files", [])
+        
+        if series_files:
+            series_folder_id = series_files[0]["id"]
+        else:
+            series_meta = {
+                "name": series_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [parent_id],
+            }
+            series_folder = drive_service.files().create(body=series_meta, fields="id").execute()
+            series_folder_id = series_folder.get("id")
+            
+        chapter_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
+        chapter_name_safe = chapter_name.replace("'", "\\'")
+        
+        chapter_query = (
+            f"'{series_folder_id}' in parents and name = '{chapter_name_safe}' and mimeType ="
+            " 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        chapter_results = drive_service.files().list(q=chapter_query, fields="files(id)").execute()
+        chapter_files = chapter_results.get("files", [])
+        
+        if chapter_files:
+            return chapter_files[0]["id"]
+            
+        chapter_meta = {
+            "name": chapter_name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [series_folder_id],
+        }
+        chapter_folder = drive_service.files().create(body=chapter_meta, fields="id").execute()
+        return chapter_folder.get("id")
 
 # Module 6: Relocation Engine
 # Module 6: Relocation Engine
@@ -436,11 +469,10 @@ def process_queue():
         series_name = row.get("Series Title", "")
         chapter_num = row.get("Chapter Number", "")
         chapter_url = row.get("Direct Chapter Web URL", "")
-        error_msg = "Link doesn't work, find a new better link"
-
+        
         if not chapter_url or not str(chapter_url).startswith("http"):
             queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 10, error_msg)
+            queue_ws.update_cell(idx, 10, "Link doesn't work, find a new better link")
             continue
 
         local_dir = f"./temp_downloads/{series_name}_Ch{chapter_num}".replace(" ", "_")
@@ -448,8 +480,7 @@ def process_queue():
 
         custom_css = str(row.get("Custom CSS Selector", "")).strip()
 
-        # Playwright now handles extraction AND downloading, returning the success count directly
-        success_count = extract_panels_with_playwright(chapter_url, local_dir, custom_selector=custom_css)
+        success_count, error_reason = extract_panels_with_playwright(chapter_url, local_dir, custom_selector=custom_css)
 
         if success_count > 0:
             gdrive_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
@@ -462,8 +493,7 @@ def process_queue():
             queue_ws.update_cell(idx, 10, "Awaiting Assistant Audit")
         else:
             queue_ws.update_cell(idx, 5, "Error")
-            queue_ws.update_cell(idx, 10, "Container missing or download blocked. Assistant please verify.")
-
+            queue_ws.update_cell(idx, 10, error_reason)
     # Note: Relocation and Cleanup are deliberately decoupled from the process_queue loop
 
 
