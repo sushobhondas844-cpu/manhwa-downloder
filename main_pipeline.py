@@ -15,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 SPREADSHEET_ID = "1Ww6sDCL8gMoJxdwOwz3kw0YIedQEdAkSNoRfj0U3wDk"
+MASTER_CONTROLLER_ID = "1H6lOh8Z_TZED6cV4FiZyodRajgdGy7DWv8Bf671YKHc"
 RAW_STAGING_FOLDER_ID = "1EGeKmI9y_7iV3Wu9LuTEJLk_5vTgZXpk"
 SHORT_FORM_ROOT_ID = "1M7g4zbm8dtksXH1nw70j8WETYMnhBwL6"
 LONG_FORM_ROOT_ID = "14lqpLT4lzAUAW6M0HLCLhF8cFadHtMm8"
@@ -241,71 +242,107 @@ def normalize_folder_name(name):
     """Normalizes spaces, underscores, and case for fuzzy folder matching."""
     return re.sub(r"[\s_]+", " ", name).strip().lower()
 
+# Module 5.1: Dynamic Directory Traversal & Sheet Sync Engine
 def get_or_create_drive_path(drive_service, root_id, path_list):
-    """Dynamically crawls through infinite folder stages, matching flexibly before creating."""
+    """Fallback 1-tier crawler used exclusively for Short-Form manhwa."""
     current_parent_id = root_id
-
     for folder_name in path_list:
-        target_norm = normalize_folder_name(folder_name)
-        matched_id = None
-
-        # Dynamically inspect parent directory contents
+        safe_name = folder_name.replace("'", "\\'")
         query = (
-            f"'{current_parent_id}' in parents and mimeType ="
-            " 'application/vnd.google-apps.folder' and trashed = false"
+            f"'{current_parent_id}' in parents and name = '{safe_name}' and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         )
         results = drive_service.files().list(
-            q=query,
-            fields="files(id, name)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            pageSize=1000,
+            q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
         ).execute()
-        
         files = results.get("files", [])
-
-        # Fuzzy match to catch spacing or underscore differences
-        for f in files:
-            if normalize_folder_name(f["name"]) == target_norm:
-                matched_id = f["id"]
-                break
-
-        if matched_id:
-            # Folder exists, step inside it
-            current_parent_id = matched_id
+        if files:
+            current_parent_id = files[0]["id"]
         else:
-            # Folder missing, create it and step inside
-            meta = {
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [current_parent_id],
-            }
-            folder = drive_service.files().create(
-                body=meta, 
-                fields="id", 
-                supportsAllDrives=True
-            ).execute()
+            meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder", "parents": [current_parent_id]}
+            folder = drive_service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
             current_parent_id = folder.get("id")
-
     return current_parent_id
 
-# Helper with escaped single quotes for Google Drive queries
-def get_or_create_target_folder(drive_service, series_name, chapter_num, is_short=True):
+def get_or_create_target_folder(gc, drive_service, series_name, chapter_num, is_short=True):
     clean_series = series_name.strip()
     
     if is_short:
-        root_id = SHORT_FORM_ROOT_ID
-        # 1-Tier: [Series Name]
-        path = [clean_series]
-    else:
-        root_id = LONG_FORM_ROOT_ID
-        # Standardize chapter folder naming with spaces
-        chapter_name = f"{clean_series} Chapter {chapter_num}"
-        # 2-Tier: [Series Name] -> [Series Name Chapter N]
-        path = [clean_series, chapter_name]
+        return get_or_create_drive_path(drive_service, SHORT_FORM_ROOT_ID, [clean_series])
         
-    return get_or_create_drive_path(drive_service, root_id, path)
+    # --- LONG FORM: DATABASE-DRIVEN RESOLUTION ---
+    tracker_sheet = gc.open_by_key(SPREADSHEET_ID)
+    long_ws = tracker_sheet.worksheet("Long_Form_Tracker")
+    long_records = long_ws.get_all_records()
+    
+    series_folder_id = ""
+    row_idx = None
+    
+    # 1. Look up existing Folder ID dynamically by matching headers
+    for idx, row in enumerate(long_records, start=2):
+        if str(row.get("Series Title", "")).strip().lower() == clean_series.lower():
+            row_idx = idx
+            series_folder_id = str(row.get("Folder ID", "")).strip()
+            break
+            
+    # 2. If no Folder ID exists, create in Drive and sync to both sheets
+    if not series_folder_id:
+        meta = {
+            "name": clean_series,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [LONG_FORM_ROOT_ID]
+        }
+        folder = drive_service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
+        series_folder_id = folder.get("id")
+        
+        # Write to Long_Form_Tracker (Column O)
+        if row_idx:
+            headers = long_ws.row_values(1)
+            col_idx = headers.index("Folder ID") + 1 if "Folder ID" in headers else 15
+            long_ws.update_cell(row_idx, col_idx, series_folder_id)
+            
+        # Append to Master Controller (Status: Idle)
+        try:
+            master_sheet = gc.open_by_key(MASTER_CONTROLLER_ID).sheet1
+            master_headers = master_sheet.row_values(1)
+            new_row = [""] * max(len(master_headers), 7)
+            new_row[0] = clean_series       # Col A: Name
+            new_row[1] = 0                  # Col B: Total Chapters
+            new_row[2] = "Idle"             # Col C: Status
+            new_row[6] = series_folder_id   # Col G: Folder ID
+            master_sheet.append_row(new_row)
+        except Exception as e:
+            print(f"[DEBUG] Failed to sync Master Controller: {e}")
 
+    # 3. Resolve specific Chapter Subfolder using global visibility flags
+    chapter_name = f"{clean_series} Chapter {chapter_num}"
+    safe_chapter_name = chapter_name.replace("'", "\\'")
+    
+    query = (
+        f"'{series_folder_id}' in parents and name = '{safe_chapter_name}' and "
+        "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    results = drive_service.files().list(
+        q=query, 
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora='allDrives'
+    ).execute()
+    
+    files = results.get("files", [])
+    if files:
+        return files[0]["id"]
+        
+    chapter_meta = {
+        "name": chapter_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [series_folder_id],
+    }
+    chapter_folder = drive_service.files().create(body=chapter_meta, fields="id", supportsAllDrives=True).execute()
+    return chapter_folder.get("id")
+
+# Module 6: Relocation Engine
 # Module 6: Relocation Engine
 def execute_relocation(gc, drive_service):
     try:
@@ -316,7 +353,6 @@ def execute_relocation(gc, drive_service):
         for idx, row in enumerate(records, start=2):
             status = str(row.get("Download Status", "")).strip().upper()
 
-            # Strict 2-Step enforcement: Only move if manually marked READY TO MOVE
             if status == "READY TO MOVE":
                 staging_id = str(row.get("Raw Staging Folder ID", "")).strip()
                 series_name = str(row.get("Series Title", "")).strip()
@@ -324,7 +360,6 @@ def execute_relocation(gc, drive_service):
                 format_type = str(row.get("Format (Long / Short)", "")).strip().lower()
                 is_short = "short" in format_type
                 
-                # GET JUNK NOTES AND RENAME MAP
                 rename_map_raw = str(row.get("Panel Sequence & Rename Map", "")).strip()
                 junk_notes = str(row.get("Link Notes", "")).strip()
 
@@ -332,9 +367,9 @@ def execute_relocation(gc, drive_service):
                     continue
 
                 try:
-                    # RESTORED MISSING CODE: Create target folder, build rename dict, and fetch files
+                    # PASS GC TO TARGET RESOLVER
                     target_folder_id = get_or_create_target_folder(
-                        drive_service, series_name, chapter_num, is_short
+                        gc, drive_service, series_name, chapter_num, is_short
                     )
 
                     rename_dict = {}
@@ -359,16 +394,13 @@ def execute_relocation(gc, drive_service):
                         f_id = f['id']
                         f_name = f['name']
                         
-                        # Check if the file is flagged as junk by the Assistant
                         junk_keywords = [j.strip() for j in junk_notes.split(',') if j.strip()]
                         is_junk = any(junk in f_name for junk in junk_keywords)
 
                         if is_junk:
-                            # Delete the junk file and skip the rest of the loop
                             drive_service.files().delete(fileId=f_id).execute()
                             continue
                         
-                        # Apply rename mapping if it is a valid panel
                         new_name = rename_dict.get(f_name, f_name)
                         update_body = {'name': new_name} if new_name != f_name else None
                         
@@ -376,17 +408,43 @@ def execute_relocation(gc, drive_service):
                             fileId=f_id,
                             addParents=target_folder_id,
                             removeParents=staging_id,
-                            body=update_body
+                            body=update_body,
+                            supportsAllDrives=True
                         ).execute()
 
-                    # Delete empty staging folder after move
                     drive_service.files().delete(fileId=staging_id).execute()
 
-                    # Update Download Status and clear staging ID
                     queue_ws.update_cell(idx, 5, "Sorted & Relocated")
                     queue_ws.update_cell(idx, 6, "")
-                    # FIX: Shifted to Column 10 (Link Notes)
                     queue_ws.update_cell(idx, 10, "Ready for Processing")
+                    
+                    # --- TWO-WAY COUNTER SYNCHRONIZATION ---
+                    if not is_short:
+                        try:
+                            # 1. Update Long_Form_Tracker (Column F)
+                            long_ws = sheet.worksheet("Long_Form_Tracker")
+                            long_records = long_ws.get_all_records()
+                            for l_idx, l_row in enumerate(long_records, start=2):
+                                if str(l_row.get("Series Title", "")).strip().lower() == series_name.strip().lower():
+                                    curr_dl = l_row.get("Downloaded Chapters", 0)
+                                    new_dl = int(curr_dl) + 1 if str(curr_dl).isdigit() else 1
+                                    headers = long_ws.row_values(1)
+                                    col_dl = headers.index("Downloaded Chapters") + 1 if "Downloaded Chapters" in headers else 6
+                                    long_ws.update_cell(l_idx, col_dl, new_dl)
+                                    break
+                                    
+                            # 2. Update Master Controller (Column B)
+                            master_sheet = gc.open_by_key(MASTER_CONTROLLER_ID).sheet1
+                            m_records = master_sheet.get_all_records()
+                            for m_idx, m_row in enumerate(m_records, start=2):
+                                if str(m_row.get("Name", "")).strip().lower() == series_name.strip().lower():
+                                    curr_tot = m_row.get("Total Chapters", 0)
+                                    new_tot = int(curr_tot) + 1 if str(curr_tot).isdigit() else 1
+                                    master_sheet.update_cell(m_idx, 2, new_tot) # Col B is index 2
+                                    break
+                        except Exception as sync_err:
+                            print(f"[DEBUG] Failed to update chapter counters: {sync_err}")
+
                 except Exception as e:
                     print(f"Relocation Error for Row {idx} ({series_name}): {e}")
 
