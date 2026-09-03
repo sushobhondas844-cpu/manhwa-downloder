@@ -236,28 +236,43 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
     return created_id
 
 
-# Helper with escaped single quotes for Google Drive queries
-# Helper with escaped single quotes for Google Drive queries
 # Module 5.1: Dynamic Directory Traversal Engine
+def normalize_folder_name(name):
+    """Normalizes spaces, underscores, and case for fuzzy folder matching."""
+    return re.sub(r"[\s_]+", " ", name).strip().lower()
+
 def get_or_create_drive_path(drive_service, root_id, path_list):
-    """
-    Dynamically crawls through a list of folder names.
-    Creates any missing folders along the path and returns the final folder ID.
-    """
+    """Dynamically crawls through infinite folder stages, matching flexibly before creating."""
     current_parent_id = root_id
-    
+
     for folder_name in path_list:
-        safe_name = folder_name.replace("'", "\\'")
+        target_norm = normalize_folder_name(folder_name)
+        matched_id = None
+
+        # Dynamically inspect parent directory contents
         query = (
-            f"'{current_parent_id}' in parents and name = '{safe_name}' and "
-            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            f"'{current_parent_id}' in parents and mimeType ="
+            " 'application/vnd.google-apps.folder' and trashed = false"
         )
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = results.get("files", [])
+        results = drive_service.files().list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageSize=1000,
+        ).execute()
         
-        if files:
-            # Folder exists, step inside it for the next loop
-            current_parent_id = files[0]["id"]
+        files = results.get("files", [])
+
+        # Fuzzy match to catch spacing or underscore differences
+        for f in files:
+            if normalize_folder_name(f["name"]) == target_norm:
+                matched_id = f["id"]
+                break
+
+        if matched_id:
+            # Folder exists, step inside it
+            current_parent_id = matched_id
         else:
             # Folder missing, create it and step inside
             meta = {
@@ -265,27 +280,32 @@ def get_or_create_drive_path(drive_service, root_id, path_list):
                 "mimeType": "application/vnd.google-apps.folder",
                 "parents": [current_parent_id],
             }
-            folder = drive_service.files().create(body=meta, fields="id").execute()
+            folder = drive_service.files().create(
+                body=meta, 
+                fields="id", 
+                supportsAllDrives=True
+            ).execute()
             current_parent_id = folder.get("id")
-            
-    return current_parent_id
 
+    return current_parent_id
 
 # Helper with escaped single quotes for Google Drive queries
 def get_or_create_target_folder(drive_service, series_name, chapter_num, is_short=True):
+    clean_series = series_name.strip()
+    
     if is_short:
         root_id = SHORT_FORM_ROOT_ID
         # 1-Tier: [Series Name]
-        path = [series_name]
+        path = [clean_series]
     else:
         root_id = LONG_FORM_ROOT_ID
-        chapter_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
-        # 2-Tier: [Series Name] -> [Chapter Name]
-        path = [series_name, chapter_name]
+        # Standardize chapter folder naming with spaces
+        chapter_name = f"{clean_series} Chapter {chapter_num}"
+        # 2-Tier: [Series Name] -> [Series Name Chapter N]
+        path = [clean_series, chapter_name]
         
     return get_or_create_drive_path(drive_service, root_id, path)
 
-# Module 6: Relocation Engine
 # Module 6: Relocation Engine
 def execute_relocation(gc, drive_service):
     try:
