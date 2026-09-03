@@ -278,43 +278,40 @@ def get_or_create_target_folder(gc, drive_service, series_name, chapter_num, is_
     series_folder_id = ""
     row_idx = None
     
-    # 1. Look up existing Folder ID dynamically by matching headers
+    # 1. Match 'Title' or 'Series Title' in Long_Form_Tracker
     for idx, row in enumerate(long_records, start=2):
-        if str(row.get("Series Title", "")).strip().lower() == clean_series.lower():
+        title_val = str(row.get("Title") or row.get("Series Title") or "").strip()
+        if title_val.lower() == clean_series.lower():
             row_idx = idx
             series_folder_id = str(row.get("Folder ID", "")).strip()
             break
             
-    # 2. If no Folder ID exists, create in Drive and sync to both sheets
+    # 2. Check Drive under LONG_FORM_ROOT_ID first before creating
     if not series_folder_id:
-        meta = {
-            "name": clean_series,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [LONG_FORM_ROOT_ID]
-        }
-        folder = drive_service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
-        series_folder_id = folder.get("id")
+        safe_series = clean_series.replace("'", "\\'")
+        drive_query = (
+            f"'{LONG_FORM_ROOT_ID}' in parents and name = '{safe_series}' and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        drive_results = drive_service.files().list(
+            q=drive_query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+        ).execute()
+        drive_files = drive_results.get("files", [])
         
-        # Write to Long_Form_Tracker (Column O)
+        if drive_files:
+            series_folder_id = drive_files[0]["id"]
+        else:
+            meta = {"name": clean_series, "mimeType": "application/vnd.google-apps.folder", "parents": [LONG_FORM_ROOT_ID]}
+            folder = drive_service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
+            series_folder_id = folder.get("id")
+            
+        # Sync found/created Folder ID back to Long_Form_Tracker (Column O)
         if row_idx:
             headers = long_ws.row_values(1)
             col_idx = headers.index("Folder ID") + 1 if "Folder ID" in headers else 15
             long_ws.update_cell(row_idx, col_idx, series_folder_id)
-            
-        # Append to Master Controller (Status: Idle)
-        try:
-            master_sheet = gc.open_by_key(MASTER_CONTROLLER_ID).sheet1
-            master_headers = master_sheet.row_values(1)
-            new_row = [""] * max(len(master_headers), 7)
-            new_row[0] = clean_series       # Col A: Name
-            new_row[1] = 0                  # Col B: Total Chapters
-            new_row[2] = "Idle"             # Col C: Status
-            new_row[6] = series_folder_id   # Col G: Folder ID
-            master_sheet.append_row(new_row)
-        except Exception as e:
-            print(f"[DEBUG] Failed to sync Master Controller: {e}")
 
-    # 3. Resolve specific Chapter Subfolder using global visibility flags
+    # 3. Resolve Chapter Subfolder
     chapter_name = f"{clean_series} Chapter {chapter_num}"
     safe_chapter_name = chapter_name.replace("'", "\\'")
     
@@ -323,22 +320,14 @@ def get_or_create_target_folder(gc, drive_service, series_name, chapter_num, is_
         "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     )
     results = drive_service.files().list(
-        q=query, 
-        fields="files(id)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        corpora='allDrives'
+        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
     ).execute()
     
     files = results.get("files", [])
     if files:
         return files[0]["id"]
         
-    chapter_meta = {
-        "name": chapter_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [series_folder_id],
-    }
+    chapter_meta = {"name": chapter_name, "mimeType": "application/vnd.google-apps.folder", "parents": [series_folder_id]}
     chapter_folder = drive_service.files().create(body=chapter_meta, fields="id", supportsAllDrives=True).execute()
     return chapter_folder.get("id")
 
@@ -419,13 +408,15 @@ def execute_relocation(gc, drive_service):
                     queue_ws.update_cell(idx, 10, "Ready for Processing")
                     
                     # --- TWO-WAY COUNTER SYNCHRONIZATION ---
+                    # --- TWO-WAY COUNTER SYNCHRONIZATION ---
                     if not is_short:
                         try:
                             # 1. Update Long_Form_Tracker (Column F)
                             long_ws = sheet.worksheet("Long_Form_Tracker")
                             long_records = long_ws.get_all_records()
                             for l_idx, l_row in enumerate(long_records, start=2):
-                                if str(l_row.get("Series Title", "")).strip().lower() == series_name.strip().lower():
+                                l_title = str(l_row.get("Title") or l_row.get("Series Title") or "").strip()
+                                if l_title.lower() == series_name.strip().lower():
                                     curr_dl = l_row.get("Downloaded Chapters", 0)
                                     new_dl = int(curr_dl) + 1 if str(curr_dl).isdigit() else 1
                                     headers = long_ws.row_values(1)
