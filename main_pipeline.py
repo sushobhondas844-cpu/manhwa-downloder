@@ -238,71 +238,52 @@ def upload_folder_to_drive(drive_service, local_folder, folder_name, parent_id):
 
 # Helper with escaped single quotes for Google Drive queries
 # Helper with escaped single quotes for Google Drive queries
-def get_or_create_target_folder(drive_service, series_name, chapter_num, is_short=True):
-    if is_short:
-        parent_id = SHORT_FORM_ROOT_ID
-        target_name = series_name
-        safe_target_name = target_name.replace("'", "\\'")
-
+# Module 5.1: Dynamic Directory Traversal Engine
+def get_or_create_drive_path(drive_service, root_id, path_list):
+    """
+    Dynamically crawls through a list of folder names.
+    Creates any missing folders along the path and returns the final folder ID.
+    """
+    current_parent_id = root_id
+    
+    for folder_name in path_list:
+        safe_name = folder_name.replace("'", "\\'")
         query = (
-            f"'{parent_id}' in parents and name = '{safe_target_name}' and mimeType ="
-            " 'application/vnd.google-apps.folder' and trashed = false"
+            f"'{current_parent_id}' in parents and name = '{safe_name}' and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         )
         results = drive_service.files().list(q=query, fields="files(id)").execute()
         files = results.get("files", [])
         
         if files:
-            return files[0]["id"]
-            
-        meta = {
-            "name": target_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id],
-        }
-        folder = drive_service.files().create(body=meta, fields="id").execute()
-        return folder.get("id")
-    else:
-        parent_id = LONG_FORM_ROOT_ID
-        series_name_safe = series_name.replace("'", "\\'")
-        
-        series_query = (
-            f"'{parent_id}' in parents and name = '{series_name_safe}' and mimeType ="
-            " 'application/vnd.google-apps.folder' and trashed = false"
-        )
-        series_results = drive_service.files().list(q=series_query, fields="files(id)").execute()
-        series_files = series_results.get("files", [])
-        
-        if series_files:
-            series_folder_id = series_files[0]["id"]
+            # Folder exists, step inside it for the next loop
+            current_parent_id = files[0]["id"]
         else:
-            series_meta = {
-                "name": series_name,
+            # Folder missing, create it and step inside
+            meta = {
+                "name": folder_name,
                 "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent_id],
+                "parents": [current_parent_id],
             }
-            series_folder = drive_service.files().create(body=series_meta, fields="id").execute()
-            series_folder_id = series_folder.get("id")
+            folder = drive_service.files().create(body=meta, fields="id").execute()
+            current_parent_id = folder.get("id")
             
+    return current_parent_id
+
+
+# Helper with escaped single quotes for Google Drive queries
+def get_or_create_target_folder(drive_service, series_name, chapter_num, is_short=True):
+    if is_short:
+        root_id = SHORT_FORM_ROOT_ID
+        # 1-Tier: [Series Name]
+        path = [series_name]
+    else:
+        root_id = LONG_FORM_ROOT_ID
         chapter_name = f"{series_name}_Chapter_{chapter_num}".replace(" ", "_")
-        chapter_name_safe = chapter_name.replace("'", "\\'")
+        # 2-Tier: [Series Name] -> [Chapter Name]
+        path = [series_name, chapter_name]
         
-        chapter_query = (
-            f"'{series_folder_id}' in parents and name = '{chapter_name_safe}' and mimeType ="
-            " 'application/vnd.google-apps.folder' and trashed = false"
-        )
-        chapter_results = drive_service.files().list(q=chapter_query, fields="files(id)").execute()
-        chapter_files = chapter_results.get("files", [])
-        
-        if chapter_files:
-            return chapter_files[0]["id"]
-            
-        chapter_meta = {
-            "name": chapter_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [series_folder_id],
-        }
-        chapter_folder = drive_service.files().create(body=chapter_meta, fields="id").execute()
-        return chapter_folder.get("id")
+    return get_or_create_drive_path(drive_service, root_id, path)
 
 # Module 6: Relocation Engine
 # Module 6: Relocation Engine
